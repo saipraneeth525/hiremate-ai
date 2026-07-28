@@ -1,50 +1,48 @@
 import { useState } from "react";
-import axios from "axios";
-import "./App.css";
+import api from "./services/api";
+
+import Sidebar from "./components/Sidebar";
+import Header from "./components/Header";
+import DashboardContent from "./components/DashboardContent";
+import CandidateDrawer from "./components/CandidateDrawer";
 
 export default function App() {
-  const [message, setMessage] = useState("");
-  const [reply, setReply] = useState("Welcome to HireMate AI 🚀");
+  // ===========================
+  // State
+  // ===========================
 
-  const [jdFile, setJdFile] = useState(null);
-  const [resumeFiles, setResumeFiles] = useState([]);
+  const [atsResults, setAtsResults] = useState([]);
+  const [selectedCandidate, setSelectedCandidate] = useState(null);
 
+  // ===========================
   // Upload Job Description
+  // ===========================
+
   const uploadJD = async (event) => {
     const file = event.target.files[0];
 
     if (!file) return;
 
-    setJdFile(file);
-
     const formData = new FormData();
     formData.append("file", file);
 
     try {
-      const res = await axios.post(
-        "http://127.0.0.1:8001/upload-jd",
-        formData,
-        {
-          headers: {
-            "Content-Type": "multipart/form-data",
-          },
-        }
-      );
-
-      alert(res.data.message);
+      await api.post("/upload-jd", formData);
+      alert("✅ Job Description Uploaded");
     } catch (err) {
       console.error(err);
       alert("JD Upload Failed");
     }
   };
 
-  // Upload Resumes
+  // ===========================
+  // Upload Resume(s)
+  // ===========================
+
   const uploadResumes = async (event) => {
     const files = Array.from(event.target.files);
 
     if (files.length === 0) return;
-
-    setResumeFiles(files);
 
     const formData = new FormData();
 
@@ -53,116 +51,67 @@ export default function App() {
     });
 
     try {
-      const res = await axios.post(
-        "http://127.0.0.1:8001/upload-resumes",
-        formData,
-        {
-          headers: {
-            "Content-Type": "multipart/form-data",
-          },
-        }
-      );
-
-      alert(res.data.message);
+      await api.post("/upload-resumes", formData);
+      alert("✅ Resume Upload Successful");
     } catch (err) {
       console.error(err);
       alert("Resume Upload Failed");
     }
   };
 
-  // Analyze
-  const sendMessage = async () => {
-    if (!message.trim()) return;
+  // ===========================
+  // Calculate ATS
+  // ===========================
 
+  const calculateATS = async () => {
     try {
-      const res = await axios.post(
-        "http://127.0.0.1:8001/analyze",
-        {
-          question: message,
-        }
-      );
-
-      setReply(res.data.analysis);
-      setMessage("");
+      const res = await api.post("/calculate-ats");
+      setAtsResults(res.data.results);
     } catch (err) {
       console.error(err);
-      setReply("Backend connection failed.");
+      alert("ATS Calculation Failed");
     }
   };
 
+  // ===========================
+  // AI Recruiter Chat
+  // ===========================
+
+  const sendMessage = async (message) => {
+    try {
+      const res = await api.post("/chat", { message });
+      return res.data.answer;
+    } catch (err) {
+      console.error(err);
+      return "Unable to connect to backend.";
+    }
+  };
+
+  // ===========================
+  // UI
+  // ===========================
+
   return (
-    <div className="container">
-      <div className="card">
-        <h1>HireMate AI</h1>
+    <div className="flex min-h-screen bg-slate-100">
+      <Sidebar />
 
-        <div className="upload">
-          <label>Upload Job Description</label>
-          <input
-            type="file"
-            accept=".pdf,.doc,.docx,.txt"
-            onChange={uploadJD}
-          />
+      <main className="flex-1 overflow-y-auto">
+        <Header />
 
-          {jdFile && (
-            <p>
-              <b>Selected:</b> {jdFile.name}
-            </p>
-          )}
-        </div>
+        <DashboardContent
+          uploadJD={uploadJD}
+          uploadResumes={uploadResumes}
+          calculateATS={calculateATS}
+          atsResults={atsResults}
+          sendMessage={sendMessage}
+          onView={setSelectedCandidate}
+        />
+      </main>
 
-        <div className="upload">
-          <label>Upload Resumes</label>
-          <input
-            type="file"
-            multiple
-            accept=".pdf,.doc,.docx,.txt"
-            onChange={uploadResumes}
-          />
-
-          {resumeFiles.length > 0 && (
-            <div>
-              <p>
-                <b>Uploaded Resumes:</b>
-              </p>
-
-              <ul>
-                {resumeFiles.map((file, index) => (
-                  <li key={index}>{file.name}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-
-        <div className="chat">
-          <div className="messages">
-            <p>
-              <b>AI:</b>
-            </p>
-
-            <pre
-              style={{
-                whiteSpace: "pre-wrap",
-                fontFamily: "inherit",
-                textAlign: "left",
-              }}
-            >
-              {reply}
-            </pre>
-          </div>
-
-          <div className="input-area">
-            <input
-              type="text"
-              placeholder="Ask anything..."
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-            />
-
-            <button onClick={sendMessage}>Send</button>
-          </div>
-        </div>
-      </div>
+      <CandidateDrawer
+        candidate={selectedCandidate}
+        onClose={() => setSelectedCandidate(null)}
+      />
     </div>
   );
 }

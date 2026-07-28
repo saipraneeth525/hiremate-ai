@@ -1,17 +1,31 @@
 import os
+
+import json
+
+from ats_engine import calculate_resume_score
 import shutil
 from typing import List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File
+
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    HTTPException
+)
+
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 from groq import Groq
 
 from file_utils import extract_text
+from resume_parser import parse_resume
+
 
 # =====================================================
-# Load Environment Variables
+# Environment
 # =====================================================
 
 load_dotenv()
@@ -20,8 +34,9 @@ client = Groq(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
+
 # =====================================================
-# FastAPI App
+# FastAPI
 # =====================================================
 
 app = FastAPI(
@@ -29,13 +44,15 @@ app = FastAPI(
     version="2.0"
 )
 
+
 # =====================================================
-# Create Upload Directories
+# Directories
 # =====================================================
 
 os.makedirs("uploads", exist_ok=True)
 os.makedirs("uploads/jd", exist_ok=True)
 os.makedirs("uploads/resumes", exist_ok=True)
+os.makedirs("parsed_data", exist_ok=True)
 
 # =====================================================
 # CORS
@@ -67,18 +84,19 @@ class ChatRequest(BaseModel):
 
 @app.get("/")
 def home():
-
     return {
         "message": "HireMate AI Backend Running 🚀"
     }
 
 
 # =====================================================
-# Upload Job Description
+# Upload JD
 # =====================================================
 
 @app.post("/upload-jd")
-async def upload_jd(file: UploadFile = File(...)):
+async def upload_jd(
+    file: UploadFile = File(...)
+):
 
     filepath = os.path.join(
         "uploads",
@@ -89,15 +107,21 @@ async def upload_jd(file: UploadFile = File(...)):
     with open(filepath, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    # Extract text from JD
+    text = extract_text(filepath)
+
+    # Save extracted text for ATS engine
+    with open("uploads/jd/jd.txt", "w", encoding="utf-8") as f:
+        f.write(text)
+
     return {
         "success": True,
-        "message": "Job Description uploaded successfully.",
         "filename": file.filename
     }
 
 
 # =====================================================
-# Upload Multiple Resumes
+# Upload Resumes
 # =====================================================
 
 @app.post("/upload-resumes")
@@ -105,7 +129,7 @@ async def upload_resumes(
     files: List[UploadFile] = File(...)
 ):
 
-    uploaded_files = []
+    uploaded = []
 
     for file in files:
 
@@ -118,389 +142,130 @@ async def upload_resumes(
         with open(filepath, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        uploaded_files.append(file.filename)
-
-    return {
-        "success": True,
-        "message": "Resumes uploaded successfully.",
-        "total_files": len(uploaded_files),
-        "files": uploaded_files
-    }
-    # =====================================================
-# Helper Function - Load Job Description
-# =====================================================
-
-def load_job_description():
-
-    jd_files = os.listdir("uploads/jd")
-
-    if not jd_files:
-        return None
-
-    jd_path = os.path.join(
-        "uploads",
-        "jd",
-        jd_files[0]
-    )
-
-    return extract_text(jd_path)
-
-
-# =====================================================
-# Helper Function - Load All Resumes
-# =====================================================
-
-def load_all_resumes():
-
-    resume_files = os.listdir("uploads/resumes")
-
-    if not resume_files:
-        return None
-
-    resumes = ""
-
-    for filename in resume_files:
-
-        filepath = os.path.join(
-            "uploads",
-            "resumes",
-            filename
-        )
-
-        resume_text = extract_text(filepath)
-
-        resumes += f"""
-
-==================================================
-Candidate Name: {filename}
-==================================================
-
-{resume_text}
-
-"""
-
-    return resumes
-
-
-# =====================================================
-# Test Job Description Extraction
-# =====================================================
-
-@app.get("/test-jd")
-def test_jd():
-
-    jd_files = os.listdir("uploads/jd")
-
-    if not jd_files:
-
-        return {
-            "success": False,
-            "message": "No Job Description uploaded."
-        }
-
-    jd_path = os.path.join(
-        "uploads",
-        "jd",
-        jd_files[0]
-    )
-
-    text = extract_text(jd_path)
-
-    return {
-        "success": True,
-        "filename": jd_files[0],
-        "preview": text[:2000]
-    }
-
-
-# =====================================================
-# Test Resume Extraction
-# =====================================================
-
-@app.get("/test-resumes")
-def test_resumes():
-
-    resume_files = os.listdir("uploads/resumes")
-
-    if not resume_files:
-
-        return {
-            "success": False,
-            "message": "No resumes uploaded."
-        }
-
-    data = []
-
-    for filename in resume_files:
-
-        filepath = os.path.join(
-            "uploads",
-            "resumes",
-            filename
-        )
-
         text = extract_text(filepath)
 
-        data.append(
-            {
-                "filename": filename,
-                "preview": text[:800]
-            }
+        parsed = parse_resume(text)
+
+        json_file = os.path.join(
+            "parsed_data",
+            file.filename.rsplit(".", 1)[0] + ".json"
         )
+
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, indent=4)
+
+        uploaded.append(file.filename)
 
     return {
         "success": True,
-        "total_resumes": len(data),
-        "resumes": data
+        "uploaded": uploaded
     }
-    # =====================================================
-# Analyze Resumes (ATS + Recruiter Questions)
+
+
+# =====================================================
+# Calculate ATS
 # =====================================================
 
-@app.post("/analyze")
-def analyze(request: AnalyzeRequest):
+@app.post("/calculate-ats")
+async def calculate_ats():
 
-    # Load Job Description
-    jd_text = load_job_description()
+    jd_path = "uploads/jd/jd.txt"
 
-    if jd_text is None:
-        return {
-            "success": False,
-            "error": "Please upload a Job Description first."
-        }
+    if not os.path.exists(jd_path):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a Job Description first."
+        )
 
-    # Load Resumes
-    resumes = load_all_resumes()
+    with open(jd_path, "r", encoding="utf-8") as f:
+        jd_text = f.read()
 
-    if resumes is None:
-        return {
-            "success": False,
-            "error": "Please upload resumes first."
-        }
+    results = []
 
-    prompt = f"""
-You are HireMate AI.
+    for file in os.listdir("parsed_data"):
 
-You are an expert Technical Recruiter,
-Senior HR Manager,
-and Applicant Tracking System (ATS).
+        if not file.endswith(".json"):
+            continue
 
-You must answer ONLY using the uploaded Job Description and Candidate Resumes.
+        with open(
+            os.path.join("parsed_data", file),
+            "r",
+            encoding="utf-8"
+        ) as f:
+            resume = json.load(f)
 
-==================================================
-JOB DESCRIPTION
-==================================================
+        ats = calculate_resume_score(
+            jd_text,
+            resume.get("skills", []),
+            resume.get("education", []),
+            resume.get("experience", []),
+            resume.get("projects", []),
+            resume.get("certifications", [])
+        )
 
-{jd_text}
+        resume["ats_score"] = ats["ats_score"]
+        resume["matched_skills"] = ats["matched_skills"]
+        resume["missing_skills"] = ats["missing_skills"]
 
-==================================================
-CANDIDATE RESUMES
-==================================================
+        resume["skill_score"] = ats["skill_score"]
+        resume["education_score"] = ats["education_score"]
+        resume["experience_score"] = ats["experience_score"]
+        resume["project_score"] = ats["project_score"]
+        resume["certification_score"] = ats["certification_score"]
 
-{resumes}
+        results.append(resume)
 
-==================================================
-RECRUITER QUESTION
-==================================================
-
-{request.question}
-
-==================================================
-RULES
-==================================================
-
-If the recruiter asks for:
-
-• Full ATS Report
-• Analyze all resumes
-• Rank candidates
-• Best candidate
-• Complete analysis
-
-Generate a detailed ATS report.
-
-For EACH candidate include:
-
-# Candidate Name
-
-## ATS Score (/100)
-
-## Skills Matched
-
-## Missing Skills
-
-## Experience Match
-
-## Education Match
-
-## Relevant Projects
-
-## Certifications
-
-## Strengths
-
-## Weaknesses
-
-## Missing Keywords
-
-## Hiring Decision
-
-(Hire / Consider / Reject)
-
-## Reason
-
-## Interview Questions (5)
-
---------------------------------------------------
-
-After all candidates provide:
-
-# Final Ranking
-
-Rank candidates from best to worst.
-
-Explain why Rank 1 is best.
-
-Finally generate:
-
-# Dashboard Summary
-
-- Total Candidates
-- Best Candidate
-- Highest ATS Score
-- Candidates needing improvement
-- Final Hiring Decision
-
---------------------------------------------------
-
-If the recruiter asks any normal question such as:
-
-Who has AWS certification?
-
-Who has React experience?
-
-Compare Candidate 1 and Candidate 2.
-
-Summarize Candidate 3.
-
-Which candidate has the best projects?
-
-Which resume mentions Python?
-
-Generate interview questions for Candidate 2.
-
-Answer ONLY that question.
-
-Do NOT generate the entire ATS report unless requested.
-
-Never make up information.
-
-If the answer is unavailable in the uploaded documents, reply:
-
-"The uploaded documents do not contain that information."
-
-Return Markdown.
-"""
-
-    response = client.chat.completions.create(
-
-        model="llama-3.3-70b-versatile",
-
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+    results.sort(
+        key=lambda x: x["ats_score"],
+        reverse=True
     )
 
     return {
         "success": True,
-        "analysis": response.choices[0].message.content
+        "results": results
     }
-    # =====================================================
-# Chat with Uploaded Documents
+
+
+
+
+# =====================================================
+# Recruiter Chat
 # =====================================================
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+async def recruiter_chat(request: ChatRequest):
 
-    # Load Job Description
-    jd_text = load_job_description()
+    candidates = []
 
-    if jd_text is None:
-        return {
-            "success": False,
-            "error": "Please upload a Job Description first."
-        }
+    for file in os.listdir("parsed_data"):
 
-    # Load Resumes
-    resumes = load_all_resumes()
+        if file.endswith(".json"):
 
-    if resumes is None:
-        return {
-            "success": False,
-            "error": "Please upload resumes first."
-        }
+            with open(
+                os.path.join("parsed_data", file),
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                candidates.append(json.load(f))
 
     prompt = f"""
-You are HireMate AI, an intelligent AI Recruiter.
+You are an AI Recruiter.
 
-You must answer ONLY using the uploaded Job Description and Candidate Resumes.
+Candidate Database:
 
-==================================================
-JOB DESCRIPTION
-==================================================
+{json.dumps(candidates, indent=2)}
 
-{jd_text}
-
-==================================================
-CANDIDATE RESUMES
-==================================================
-
-{resumes}
-
-==================================================
-USER QUESTION
-==================================================
+Recruiter's Question:
 
 {request.message}
 
-==================================================
-INSTRUCTIONS
-==================================================
-
-Answer the user's question using ONLY the uploaded documents.
-
-Examples:
-- Who is the best candidate?
-- Rank all candidates.
-- Which candidate has AWS certification?
-- Which candidate has React experience?
-- Compare Candidate A and Candidate B.
-- Summarize Candidate X.
-- Which candidates satisfy the JD?
-- Generate interview questions for Candidate Y.
-
-Do not invent information.
-
-If the answer is not available in the uploaded Job Description or resumes, reply:
-
-"The uploaded documents do not contain that information."
-
-Format the response using Markdown with headings and bullet points where appropriate.
+Answer professionally.
 """
 
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are HireMate AI, an AI recruiting assistant. "
-                    "Answer only from the uploaded documents."
-                )
-            },
             {
                 "role": "user",
                 "content": prompt
@@ -509,7 +274,31 @@ Format the response using Markdown with headings and bullet points where appropr
     )
 
     return {
-        "success": True,
-        "reply": response.choices[0].message.content
+        "answer": response.choices[0].message.content
     }
-    
+
+
+# =====================================================
+# Candidate Details API
+# =====================================================
+
+@app.get("/candidate/{candidate_name}")
+async def get_candidate(candidate_name: str):
+
+    for file in os.listdir("parsed_data"):
+
+        if not file.endswith(".json"):
+            continue
+
+        path = os.path.join("parsed_data", file)
+
+        with open(path, "r", encoding="utf-8") as f:
+            candidate = json.load(f)
+
+        if candidate.get("candidate", "").lower() == candidate_name.lower():
+            return candidate
+
+    raise HTTPException(
+        status_code=404,
+        detail="Candidate not found"
+    )
